@@ -167,6 +167,20 @@ func TestValidateURLSafetyRejectsLocalhostWithDockerHint(t *testing.T) {
 	}
 }
 
+func TestValidateURLSafetyDenyHostWinsOverAllowCIDR(t *testing.T) {
+	options := DefaultOptions()
+	options.DenyHosts = []string{"127.0.0.1"}
+	options.AllowCIDRs = []string{"127.0.0.0/8"}
+
+	_, err := ValidateURLSafety("http://127.0.0.1:3000", options)
+	if err == nil {
+		t.Fatal("expected denied IP to be rejected even when allowed by CIDR")
+	}
+	if !strings.Contains(err.Error(), "Docker 容器中的 localhost") {
+		t.Fatalf("expected denied localhost error, got: %v", err)
+	}
+}
+
 func TestDownloadImageWithOptionsRejectsRedirectToDeniedHost(t *testing.T) {
 	var server *httptest.Server
 	server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -335,6 +349,7 @@ func TestGetFaviconURLsWithOptionsBypassesProxyForNoProxyCIDR(t *testing.T) {
 	options.ProxyFromEnv = false
 	options.NoProxy = []string{"127.0.0.0/8"}
 	options.AllowCIDRs = []string{"127.0.0.0/8"}
+	options.DenyHosts = []string{}
 
 	icons, err := GetFaviconURLsWithOptions(target.URL, options)
 	if err != nil {

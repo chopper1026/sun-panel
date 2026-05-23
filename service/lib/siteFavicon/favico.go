@@ -621,9 +621,6 @@ func validateParsedURLSafety(parsedURL *url.URL, options Options) error {
 	lowerHost := strings.ToLower(strings.Trim(host, "[]"))
 	for _, denied := range options.DenyHosts {
 		if lowerHost == strings.ToLower(strings.TrimSpace(denied)) {
-			if ip := net.ParseIP(lowerHost); ip != nil && cidrContainsIP(options.AllowCIDRs, ip) {
-				continue
-			}
 			if lowerHost == "localhost" || lowerHost == "127.0.0.1" || lowerHost == "::1" {
 				return errors.New("Docker 容器中的 localhost 不是你的电脑或 NAS 宿主机，请使用 NAS 在局域网中的真实 IP 或 Docker 网络可访问地址")
 			}
