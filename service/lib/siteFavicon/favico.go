@@ -221,16 +221,9 @@ func getFaviconURL(rawURL string, options Options) ([]string, error) {
 	var lastErr error
 	for _, candidate := range candidates {
 		if !options.SkipSafetyCheck {
-			proxied, err := usesConfiguredProxy(candidate, options)
-			if err != nil {
+			if err := validateParsedURLSafety(candidate, options); err != nil {
 				lastErr = err
 				continue
-			}
-			if !proxied {
-				if err := validateParsedURLSafety(candidate, options); err != nil {
-					lastErr = err
-					continue
-				}
 			}
 		}
 		icons, err := discoverFaviconURLs(candidate, options)
@@ -246,25 +239,11 @@ func getFaviconURL(rawURL string, options Options) ([]string, error) {
 	return nil, errors.New("未找到图标")
 }
 
-func usesConfiguredProxy(targetURL *url.URL, options Options) (bool, error) {
-	if strings.TrimSpace(options.ProxyURL) == "" {
-		return false, nil
-	}
-	if shouldBypassProxy(targetURL, options.NoProxy) {
-		return false, nil
-	}
-	if _, err := parseProxyURL(options.ProxyURL); err != nil {
-		return false, err
-	}
-	return true, nil
-}
-
 func preserveProxyRootRequestURI(req *http.Request, options Options) {
 	if req == nil || req.URL == nil || req.URL.Path != "" || req.URL.RawQuery != "" {
 		return
 	}
-	proxied, err := usesConfiguredProxy(req.URL, options)
-	if err != nil || !proxied {
+	if strings.TrimSpace(options.ProxyURL) == "" || shouldBypassProxy(req.URL, options.NoProxy) {
 		return
 	}
 	req.URL.Opaque = "//" + req.URL.Host

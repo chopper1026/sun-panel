@@ -320,6 +320,8 @@ func TestGetFaviconURLsWithOptionsUsesConfiguredHTTPProxy(t *testing.T) {
 	options.ProxyURL = proxy.URL
 	options.ProxyFromEnv = false
 	options.NoProxy = nil
+	options.DenyHosts = []string{}
+	options.AllowCIDRs = []string{"127.0.0.0/8"}
 
 	icons, err := GetFaviconURLsWithOptions(target.URL, options)
 	if err != nil {
@@ -360,6 +362,34 @@ func TestGetFaviconURLsWithOptionsBypassesProxyForNoProxyCIDR(t *testing.T) {
 	}
 	if len(icons) == 0 || icons[0] != target.URL+"/favicon.png" {
 		t.Fatalf("unexpected icon candidates: %#v", icons)
+	}
+}
+
+func TestGetFaviconURLsWithOptionsRejectsDeniedHostBeforeProxy(t *testing.T) {
+	proxyHit := false
+	proxy := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		proxyHit = true
+		w.Header().Set("Content-Type", "text/html")
+		_, _ = w.Write([]byte(`<html><head><link rel="icon" href="/favicon.png"></head></html>`))
+	}))
+	defer proxy.Close()
+
+	options := DefaultOptions()
+	options.ProxyURL = proxy.URL
+	options.ProxyFromEnv = false
+	options.NoProxy = []string{}
+	options.DenyHosts = []string{"127.0.0.1"}
+	options.AllowCIDRs = []string{"127.0.0.0/8"}
+
+	_, err := GetFaviconURLsWithOptions("http://127.0.0.1:3000", options)
+	if err == nil {
+		t.Fatal("expected denied target to be rejected before proxy")
+	}
+	if proxyHit {
+		t.Fatal("expected denied target not to reach proxy")
+	}
+	if !strings.Contains(err.Error(), "Docker 容器中的 localhost") {
+		t.Fatalf("expected denied localhost error, got: %v", err)
 	}
 }
 
