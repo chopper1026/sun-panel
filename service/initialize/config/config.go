@@ -18,11 +18,14 @@ func getDefaultConfig() map[string]map[string]string {
 			"file_path": "./database.db",
 		},
 		"favicon": {
-			"timeout_seconds":       "5",
+			"timeout_seconds":       "15",
 			"max_download_bytes":    "1048576",
 			"allow_private_network": "true",
 			"allow_cidrs":           "192.168.0.0/16,10.0.0.0/8,172.16.0.0/12",
 			"deny_hosts":            "localhost,127.0.0.1,::1,169.254.169.254",
+			"proxy_url":             "",
+			"proxy_from_env":        "true",
+			"no_proxy":              "localhost,127.0.0.1,::1,192.168.0.0/16,10.0.0.0/8,172.16.0.0/12",
 		},
 	}
 

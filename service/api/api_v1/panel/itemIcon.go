@@ -6,7 +6,6 @@ import (
 	"mime"
 	"os"
 	"path"
-	"strconv"
 	"strings"
 	"sun-panel/api/api_v1/common/apiData/commonApiStructs"
 	"sun-panel/api/api_v1/common/apiData/panelApiStructs"
@@ -361,28 +360,11 @@ func saveFaviconCache(cache models.FaviconCache) error {
 }
 
 func getFaviconOptionsFromConfig() siteFavicon.Options {
-	options := siteFavicon.DefaultOptions()
-	if global.Config == nil {
-		return options
+	setting, err := getEffectiveFaviconNetworkSetting()
+	if err != nil {
+		setting = getFaviconNetworkSettingFromConfig()
 	}
-
-	if timeoutSeconds, err := strconv.Atoi(strings.TrimSpace(global.Config.GetValueStringOrDefault("favicon", "timeout_seconds"))); err == nil && timeoutSeconds > 0 {
-		options.Timeout = time.Duration(timeoutSeconds) * time.Second
-	}
-	if maxDownloadBytes, err := strconv.ParseInt(strings.TrimSpace(global.Config.GetValueStringOrDefault("favicon", "max_download_bytes")), 10, 64); err == nil && maxDownloadBytes > 0 {
-		options.MaxDownloadBytes = maxDownloadBytes
-	}
-	if allowPrivateNetwork, err := strconv.ParseBool(strings.TrimSpace(global.Config.GetValueStringOrDefault("favicon", "allow_private_network"))); err == nil {
-		options.AllowPrivateNetwork = allowPrivateNetwork
-	}
-	if allowCIDRs := splitConfigList(global.Config.GetValueStringOrDefault("favicon", "allow_cidrs")); len(allowCIDRs) > 0 {
-		options.AllowCIDRs = allowCIDRs
-	}
-	if denyHosts := splitConfigList(global.Config.GetValueStringOrDefault("favicon", "deny_hosts")); len(denyHosts) > 0 {
-		options.DenyHosts = denyHosts
-	}
-
-	return options
+	return getFaviconOptionsFromSetting(setting)
 }
 
 func splitConfigList(value string) []string {
