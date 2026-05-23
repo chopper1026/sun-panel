@@ -60,6 +60,10 @@ func (a *NetworkSetting) SetFavicon(c *gin.Context) {
 		apiReturn.ErrorParamFomat(c, err.Error())
 		return
 	}
+	if global.SystemSetting == nil {
+		apiReturn.ErrorDatabase(c, "system setting cache is not initialized")
+		return
+	}
 	if err := global.SystemSetting.Set(systemSetting.FAVICON_NETWORK, normalized); err != nil {
 		apiReturn.ErrorDatabase(c, err.Error())
 		return
