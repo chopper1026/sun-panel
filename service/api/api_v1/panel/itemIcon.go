@@ -3,9 +3,10 @@ package panel
 import (
 	"encoding/json"
 	"fmt"
-	"net/url"
+	"mime"
 	"os"
 	"path"
+	"strconv"
 	"strings"
 	"sun-panel/api/api_v1/common/apiData/commonApiStructs"
 	"sun-panel/api/api_v1/common/apiData/panelApiStructs"
@@ -205,42 +206,19 @@ func (a *ItemIcon) GetSiteFavicon(c *gin.Context) {
 		return
 	}
 	resp := panelApiStructs.ItemIconGetSiteFaviconResp{}
-	fullUrl := ""
-	if iconUrl, err := siteFavicon.GetOneFaviconURL(req.Url); err != nil {
-		apiReturn.Error(c, "acquisition failed: get ico error:"+err.Error())
-		return
-	} else {
-		fullUrl = iconUrl
-	}
 
-	parsedURL, err := url.Parse(req.Url)
+	faviconOptions := getFaviconOptionsFromConfig()
+	normalizedURL, err := siteFavicon.ValidateURLSafety(req.Url, faviconOptions)
 	if err != nil {
-		apiReturn.Error(c, "acquisition failed:"+err.Error())
+		apiReturn.Error(c, "图标获取失败："+err.Error())
 		return
 	}
 
-	protocol := parsedURL.Scheme
-	global.Logger.Debug("protocol:", protocol)
-	global.Logger.Debug("fullUrl:", fullUrl)
-
-	// 如果URL以双斜杠（//）开头，则使用当前页面协议
-	if strings.HasPrefix(fullUrl, "//") {
-		fullUrl = protocol + "://" + fullUrl[2:]
-	} else if !strings.HasPrefix(fullUrl, "http://") && !strings.HasPrefix(fullUrl, "https://") {
-		// 如果URL既不以http://开头也不以https://开头，则默认为http协议
-		fullUrl = "http://" + fullUrl
+	iconURLs, err := siteFavicon.GetFaviconURLsWithOptions(req.Url, faviconOptions)
+	if err != nil {
+		apiReturn.Error(c, "图标获取失败："+err.Error())
+		return
 	}
-	global.Logger.Debug("fullUrl:", fullUrl)
-	// 去除图标的get参数
-	{
-		parsedIcoURL, err := url.Parse(fullUrl)
-		if err != nil {
-			apiReturn.Error(c, "acquisition failed: parsed ico URL :"+err.Error())
-			return
-		}
-		fullUrl = parsedIcoURL.Scheme + "://" + parsedIcoURL.Host + parsedIcoURL.Path
-	}
-	global.Logger.Debug("fullUrl:", fullUrl)
 
 	// 生成保存目录
 	configUpload := global.Config.GetValueString("base", "source_path")
@@ -252,21 +230,169 @@ func (a *ItemIcon) GetSiteFavicon(c *gin.Context) {
 
 	// 下载
 	var imgInfo *os.File
-	{
-		var err error
-		if imgInfo, err = siteFavicon.DownloadImage(fullUrl, savePath, 1024*1024); err != nil {
-			apiReturn.Error(c, "acquisition failed: download"+err.Error())
+	fullUrl := ""
+	var lastDownloadErr error
+	for _, iconURL := range iconURLs {
+		global.Logger.Debug("favicon candidate:", iconURL)
+		if cache, ok := getReusableFaviconCache(iconURL); ok {
+			resp.IconUrl = strings.TrimPrefix(cache.LocalSrc, ".")
+			apiReturn.SuccessData(c, resp)
 			return
 		}
+		if imgInfo, err = siteFavicon.DownloadImageWithOptions(iconURL, savePath, faviconOptions); err == nil {
+			fullUrl = iconURL
+			break
+		}
+		lastDownloadErr = err
+	}
+	if imgInfo == nil {
+		if lastDownloadErr != nil {
+			apiReturn.Error(c, "图标获取失败："+lastDownloadErr.Error())
+		} else {
+			apiReturn.Error(c, "图标获取失败：未找到可下载的图标")
+		}
+		return
+	}
+	global.Logger.Debug("favicon selected:", fullUrl)
+
+	contentHash, fileSize, err := siteFavicon.HashFile(imgInfo.Name())
+	if err != nil {
+		_ = os.Remove(imgInfo.Name())
+		apiReturn.Error(c, "图标获取失败：计算图标 hash 失败："+err.Error())
+		return
+	}
+
+	if cache, ok := getReusableFaviconCacheByHash(contentHash, fileSize); ok {
+		_ = os.Remove(imgInfo.Name())
+		if err := saveFaviconCache(models.FaviconCache{
+			SourceURL:    normalizedURL.String(),
+			FinalIconURL: fullUrl,
+			LocalSrc:     cache.LocalSrc,
+			FileId:       cache.FileId,
+			ContentHash:  cache.ContentHash,
+			ContentType:  cache.ContentType,
+			Size:         cache.Size,
+			LastUsedAt:   time.Now(),
+		}); err != nil {
+			apiReturn.ErrorDatabase(c, err.Error())
+			return
+		}
+		resp.IconUrl = strings.TrimPrefix(cache.LocalSrc, ".")
+		apiReturn.SuccessData(c, resp)
+		return
 	}
 
 	// 保存到数据库
-	ext := path.Ext(fullUrl)
+	ext := path.Ext(imgInfo.Name())
 	mFile := models.File{}
-	if _, err := mFile.AddFile(userInfo.ID, parsedURL.Host, ext, imgInfo.Name()); err != nil {
+	fileRecord, err := mFile.AddFile(userInfo.ID, normalizedURL.Host, ext, imgInfo.Name())
+	if err != nil {
 		apiReturn.ErrorDatabase(c, err.Error())
 		return
 	}
-	resp.IconUrl = imgInfo.Name()[1:]
+	if err := saveFaviconCache(models.FaviconCache{
+		SourceURL:    normalizedURL.String(),
+		FinalIconURL: fullUrl,
+		LocalSrc:     imgInfo.Name(),
+		FileId:       fileRecord.ID,
+		ContentHash:  contentHash,
+		ContentType:  mime.TypeByExtension(ext),
+		Size:         fileSize,
+		LastUsedAt:   time.Now(),
+	}); err != nil {
+		apiReturn.ErrorDatabase(c, err.Error())
+		return
+	}
+	resp.IconUrl = strings.TrimPrefix(imgInfo.Name(), ".")
 	apiReturn.SuccessData(c, resp)
+}
+
+func getReusableFaviconCache(finalIconURL string) (models.FaviconCache, bool) {
+	cache, err := (&models.FaviconCache{}).FindByFinalIconURL(global.Db, finalIconURL)
+	if err != nil {
+		return models.FaviconCache{}, false
+	}
+	if !faviconCacheFileExists(cache.LocalSrc) {
+		return models.FaviconCache{}, false
+	}
+	_ = cache.Touch(global.Db)
+	return cache, true
+}
+
+func getReusableFaviconCacheByHash(contentHash string, size int64) (models.FaviconCache, bool) {
+	cache, err := (&models.FaviconCache{}).FindByContentHash(global.Db, contentHash, size)
+	if err != nil {
+		return models.FaviconCache{}, false
+	}
+	if !faviconCacheFileExists(cache.LocalSrc) {
+		return models.FaviconCache{}, false
+	}
+	_ = cache.Touch(global.Db)
+	return cache, true
+}
+
+func faviconCacheFileExists(filePath string) bool {
+	if filePath == "" {
+		return false
+	}
+	info, err := os.Stat(filePath)
+	return err == nil && !info.IsDir()
+}
+
+func saveFaviconCache(cache models.FaviconCache) error {
+	existing, err := (&models.FaviconCache{}).FindByFinalIconURL(global.Db, cache.FinalIconURL)
+	if err != nil {
+		if err == gorm.ErrRecordNotFound {
+			return global.Db.Create(&cache).Error
+		}
+		return err
+	}
+
+	return global.Db.Model(&existing).Updates(map[string]interface{}{
+		"source_url":     cache.SourceURL,
+		"local_src":      cache.LocalSrc,
+		"file_id":        cache.FileId,
+		"content_hash":   cache.ContentHash,
+		"content_type":   cache.ContentType,
+		"size":           cache.Size,
+		"last_used_at":   cache.LastUsedAt,
+		"final_icon_url": cache.FinalIconURL,
+	}).Error
+}
+
+func getFaviconOptionsFromConfig() siteFavicon.Options {
+	options := siteFavicon.DefaultOptions()
+	if global.Config == nil {
+		return options
+	}
+
+	if timeoutSeconds, err := strconv.Atoi(strings.TrimSpace(global.Config.GetValueStringOrDefault("favicon", "timeout_seconds"))); err == nil && timeoutSeconds > 0 {
+		options.Timeout = time.Duration(timeoutSeconds) * time.Second
+	}
+	if maxDownloadBytes, err := strconv.ParseInt(strings.TrimSpace(global.Config.GetValueStringOrDefault("favicon", "max_download_bytes")), 10, 64); err == nil && maxDownloadBytes > 0 {
+		options.MaxDownloadBytes = maxDownloadBytes
+	}
+	if allowPrivateNetwork, err := strconv.ParseBool(strings.TrimSpace(global.Config.GetValueStringOrDefault("favicon", "allow_private_network"))); err == nil {
+		options.AllowPrivateNetwork = allowPrivateNetwork
+	}
+	if allowCIDRs := splitConfigList(global.Config.GetValueStringOrDefault("favicon", "allow_cidrs")); len(allowCIDRs) > 0 {
+		options.AllowCIDRs = allowCIDRs
+	}
+	if denyHosts := splitConfigList(global.Config.GetValueStringOrDefault("favicon", "deny_hosts")); len(denyHosts) > 0 {
+		options.DenyHosts = denyHosts
+	}
+
+	return options
+}
+
+func splitConfigList(value string) []string {
+	parts := strings.Split(value, ",")
+	result := make([]string, 0, len(parts))
+	for _, part := range parts {
+		part = strings.TrimSpace(part)
+		if part != "" {
+			result = append(result, part)
+		}
+	}
+	return result
 }
