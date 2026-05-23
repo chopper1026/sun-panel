@@ -298,7 +298,7 @@ services:
   sun-panel:
     image: sun-panel
     ports:
-      - "3002:3002"
+      - '3002:3002'
     volumes:
       - ./data/uploads:/app/uploads
       - ./data/conf:/app/conf

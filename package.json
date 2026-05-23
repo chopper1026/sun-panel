@@ -2,6 +2,7 @@
   "name": "sun-panel",
   "version": "0.0.0",
   "private": false,
+  "packageManager": "pnpm@8.15.9",
   "description": "Sun-Panel Web",
   "author": "BraisedHunter <95302870@qq.com>",
   "keywords": [
@@ -69,6 +70,5 @@
     "*.{ts,tsx,vue}": [
       "pnpm lint:fix"
     ]
-  },
-  "packageManager": "pnpm@8.15.9"
+  }
 }
