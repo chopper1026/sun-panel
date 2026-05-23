@@ -52,11 +52,17 @@ async function loadSetting() {
 async function handleSave() {
   saving.value = true
   try {
-    const { code, data } = await setFaviconNetwork<NetworkSetting.FaviconNetworkSetting>({ ...form })
+    const { code, data, msg } = await setFaviconNetwork<NetworkSetting.FaviconNetworkSetting>({ ...form })
     if (code === 0) {
       updateForm(data)
       ms.success(t('common.saveSuccess'))
     }
+    else {
+      ms.error(msg || t('apps.networkSettings.saveFailed'))
+    }
+  }
+  catch (error) {
+    ms.error(t('apps.networkSettings.saveFailed'))
   }
   finally {
     saving.value = false

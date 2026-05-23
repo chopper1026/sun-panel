@@ -365,6 +365,76 @@ func TestGetFaviconURLsWithOptionsBypassesProxyForNoProxyCIDR(t *testing.T) {
 	}
 }
 
+func TestGetFaviconURLsWithOptionsBindsProxyRequestToResolvedIP(t *testing.T) {
+	target := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		t.Fatalf("target should be reached through proxy, got direct request for %s", r.URL.String())
+	}))
+	defer target.Close()
+
+	targetURL := strings.Replace(target.URL, "127.0.0.1", "localhost", 1)
+	proxy := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		proxyHost := r.URL.Hostname()
+		if proxyHost == "localhost" {
+			t.Fatalf("proxy received unresolved target host: %s", r.URL.Host)
+		}
+		if ip := net.ParseIP(proxyHost); ip == nil || !ip.IsLoopback() {
+			t.Fatalf("proxy target host should be a loopback IP, got %q", r.URL.Host)
+		}
+		w.Header().Set("Content-Type", "text/html")
+		_, _ = w.Write([]byte(`<html><head><link rel="icon" href="/favicon.png"></head></html>`))
+	}))
+	defer proxy.Close()
+
+	options := DefaultOptions()
+	options.ProxyURL = proxy.URL
+	options.ProxyFromEnv = false
+	options.NoProxy = []string{}
+	options.DenyHosts = []string{}
+	options.AllowCIDRs = []string{"127.0.0.0/8", "::1/128"}
+
+	icons, err := GetFaviconURLsWithOptions(targetURL, options)
+	if err != nil {
+		t.Fatalf("expected favicon discovery through proxy, got error: %v", err)
+	}
+	if len(icons) == 0 || icons[0] != targetURL+"/favicon.png" {
+		t.Fatalf("unexpected icon candidates: %#v", icons)
+	}
+}
+
+func TestGetFaviconURLsWithOptionsBypassesProxyForResolvedNoProxyCIDR(t *testing.T) {
+	proxyHit := false
+	proxy := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		proxyHit = true
+		http.Error(w, "proxy should be bypassed", http.StatusBadGateway)
+	}))
+	defer proxy.Close()
+
+	target := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/html")
+		_, _ = w.Write([]byte(`<html><head><link rel="icon" href="/favicon.png"></head></html>`))
+	}))
+	defer target.Close()
+
+	targetURL := strings.Replace(target.URL, "127.0.0.1", "localhost", 1)
+	options := DefaultOptions()
+	options.ProxyURL = proxy.URL
+	options.ProxyFromEnv = false
+	options.NoProxy = []string{"127.0.0.0/8", "::1/128"}
+	options.AllowCIDRs = []string{"127.0.0.0/8", "::1/128"}
+	options.DenyHosts = []string{}
+
+	icons, err := GetFaviconURLsWithOptions(targetURL, options)
+	if err != nil {
+		t.Fatalf("expected direct favicon discovery for resolved no-proxy target, got error: %v", err)
+	}
+	if proxyHit {
+		t.Fatal("expected proxy to be bypassed")
+	}
+	if len(icons) == 0 || icons[0] != targetURL+"/favicon.png" {
+		t.Fatalf("unexpected icon candidates: %#v", icons)
+	}
+}
+
 func TestGetFaviconURLsWithOptionsRejectsDeniedHostBeforeProxy(t *testing.T) {
 	proxyHit := false
 	proxy := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -401,7 +471,30 @@ func TestGetFaviconURLsWithOptionsRejectsInvalidProxyURL(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected invalid proxy URL error")
 	}
-	if !strings.Contains(err.Error(), "仅支持 HTTP/HTTPS 代理") {
+	if !strings.Contains(err.Error(), "仅支持 HTTP 代理") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestGetFaviconURLsWithOptionsRejectsHTTPSProxyURL(t *testing.T) {
+	target := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/html")
+		_, _ = w.Write([]byte(`<html><head><link rel="icon" href="/favicon.png"></head></html>`))
+	}))
+	defer target.Close()
+
+	options := DefaultOptions()
+	options.ProxyURL = "https://127.0.0.1:7890"
+	options.ProxyFromEnv = false
+	options.NoProxy = []string{}
+	options.DenyHosts = []string{}
+	options.AllowCIDRs = []string{"127.0.0.0/8"}
+
+	_, err := GetFaviconURLsWithOptions(target.URL, options)
+	if err == nil {
+		t.Fatal("expected https proxy URL to be rejected")
+	}
+	if !strings.Contains(err.Error(), "仅支持 HTTP 代理") {
 		t.Fatalf("unexpected error: %v", err)
 	}
 }

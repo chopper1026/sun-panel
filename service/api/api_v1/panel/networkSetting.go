@@ -168,8 +168,8 @@ func normalizeFaviconNetworkSetting(setting systemSetting.FaviconNetworkSetting)
 		if err != nil {
 			return setting, fmt.Errorf("代理 URL 格式无效: %w", err)
 		}
-		if proxyURL.Scheme != "http" && proxyURL.Scheme != "https" {
-			return setting, errors.New("仅支持 HTTP/HTTPS 代理")
+		if proxyURL.Scheme != "http" {
+			return setting, errors.New("仅支持 HTTP 代理")
 		}
 		if proxyURL.Host == "" {
 			return setting, errors.New("代理 URL 缺少主机名")

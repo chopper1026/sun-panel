@@ -1,8 +1,10 @@
 package siteFavicon
 
 import (
+	"context"
 	"crypto/md5"
 	"crypto/sha256"
+	"crypto/tls"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -243,7 +245,8 @@ func preserveProxyRootRequestURI(req *http.Request, options Options) {
 	if req == nil || req.URL == nil || req.URL.Path != "" || req.URL.RawQuery != "" {
 		return
 	}
-	if strings.TrimSpace(options.ProxyURL) == "" || shouldBypassProxy(req.URL, options.NoProxy) {
+	resolvedIPs, _ := resolveHostIPs(req.URL.Hostname())
+	if strings.TrimSpace(options.ProxyURL) == "" || shouldBypassProxyWithIPs(req.URL, options.NoProxy, resolvedIPs) {
 		return
 	}
 	req.URL.Opaque = "//" + req.URL.Host
@@ -596,37 +599,43 @@ func validateParsedURLSafety(parsedURL *url.URL, options Options) error {
 		return errors.New("URL 缺少主机名")
 	}
 
-	host := parsedURL.Hostname()
+	_, err := resolveAndValidateHost(parsedURL.Hostname(), options)
+	return err
+}
+
+func resolveAndValidateHost(host string, options Options) ([]net.IP, error) {
 	lowerHost := strings.ToLower(strings.Trim(host, "[]"))
 	for _, denied := range options.DenyHosts {
 		if lowerHost == strings.ToLower(strings.TrimSpace(denied)) {
 			if lowerHost == "localhost" || lowerHost == "127.0.0.1" || lowerHost == "::1" {
-				return errors.New("Docker 容器中的 localhost 不是你的电脑或 NAS 宿主机，请使用 NAS 在局域网中的真实 IP 或 Docker 网络可访问地址")
+				return nil, errors.New("Docker 容器中的 localhost 不是你的电脑或 NAS 宿主机，请使用 NAS 在局域网中的真实 IP 或 Docker 网络可访问地址")
 			}
-			return fmt.Errorf("目标主机被安全策略拦截: %s", host)
+			return nil, fmt.Errorf("目标主机被安全策略拦截: %s", host)
 		}
 	}
 
-	ips := make([]net.IP, 0)
-	if ip := net.ParseIP(lowerHost); ip != nil {
-		ips = append(ips, ip)
-	} else {
-		resolved, err := net.LookupIP(host)
-		if err != nil {
-			return fmt.Errorf("无法解析目标主机: %w", err)
-		}
-		ips = append(ips, resolved...)
+	ips, err := resolveHostIPs(host)
+	if err != nil {
+		return nil, fmt.Errorf("无法解析目标主机: %w", err)
 	}
 	if len(ips) == 0 {
-		return errors.New("无法解析目标主机")
+		return nil, errors.New("无法解析目标主机")
 	}
 
 	for _, ip := range ips {
 		if err := validateIPSafety(ip, options); err != nil {
-			return err
+			return nil, err
 		}
 	}
-	return nil
+	return ips, nil
+}
+
+func resolveHostIPs(host string) ([]net.IP, error) {
+	lowerHost := strings.ToLower(strings.Trim(host, "[]"))
+	if ip := net.ParseIP(lowerHost); ip != nil {
+		return []net.IP{ip}, nil
+	}
+	return net.LookupIP(host)
 }
 
 func validateIPSafety(ip net.IP, options Options) error {
@@ -677,12 +686,9 @@ func cidrContainsIP(cidrs []string, ip net.IP) bool {
 }
 
 func newHTTPClient(options Options) *http.Client {
-	transport := http.DefaultTransport.(*http.Transport).Clone()
-	transport.Proxy = proxyFunc(options)
-
 	return &http.Client{
 		Timeout:   options.Timeout,
-		Transport: transport,
+		Transport: safeRoundTripper{options: options},
 		CheckRedirect: func(req *http.Request, via []*http.Request) error {
 			if options.MaxRedirects > 0 && len(via) >= options.MaxRedirects {
 				return errors.New("重定向次数过多")
@@ -695,6 +701,137 @@ func newHTTPClient(options Options) *http.Client {
 	}
 }
 
+type safeRoundTripper struct {
+	options Options
+}
+
+func (t safeRoundTripper) RoundTrip(req *http.Request) (*http.Response, error) {
+	transport := http.DefaultTransport.(*http.Transport).Clone()
+	defer transport.CloseIdleConnections()
+
+	if t.options.SkipSafetyCheck {
+		transport.Proxy = proxyFunc(t.options)
+		return transport.RoundTrip(req)
+	}
+
+	outboundReq, proxyURL, tlsServerName, err := prepareSafeOutboundRequest(req, t.options)
+	if err != nil {
+		return nil, err
+	}
+
+	if proxyURL != nil {
+		transport.Proxy = http.ProxyURL(proxyURL)
+		if outboundReq.URL.Scheme == "https" && tlsServerName != "" {
+			transport.TLSClientConfig = cloneTLSConfigWithServerName(transport.TLSClientConfig, tlsServerName)
+		}
+	} else {
+		transport.Proxy = nil
+		transport.DialContext = safeDialContext(t.options)
+	}
+
+	return transport.RoundTrip(outboundReq)
+}
+
+func prepareSafeOutboundRequest(req *http.Request, options Options) (*http.Request, *url.URL, string, error) {
+	if req == nil || req.URL == nil {
+		return nil, nil, "", errors.New("请求 URL 不能为空")
+	}
+	resolvedIPs, err := validateURLSafetyAndResolve(req.URL, options)
+	if err != nil {
+		return nil, nil, "", err
+	}
+	proxyURL, err := proxyURLForRequest(req, options, resolvedIPs)
+	if err != nil {
+		return nil, nil, "", err
+	}
+	if proxyURL == nil {
+		return req, nil, "", nil
+	}
+
+	outboundReq := req.Clone(req.Context())
+	outboundReq.URL = cloneURL(req.URL)
+	outboundReq.URL.Host = urlHostForIP(outboundReq.URL, selectOutboundIP(resolvedIPs))
+	if outboundReq.URL.Opaque != "" {
+		outboundReq.URL.Opaque = "//" + outboundReq.URL.Host
+	}
+	outboundReq.Host = req.Host
+	if outboundReq.Host == "" {
+		outboundReq.Host = req.URL.Host
+	}
+	return outboundReq, proxyURL, req.URL.Hostname(), nil
+}
+
+func validateURLSafetyAndResolve(parsedURL *url.URL, options Options) ([]net.IP, error) {
+	if parsedURL.Scheme != "http" && parsedURL.Scheme != "https" {
+		return nil, errors.New("仅支持 HTTP/HTTPS URL")
+	}
+	if parsedURL.Host == "" {
+		return nil, errors.New("URL 缺少主机名")
+	}
+	return resolveAndValidateHost(parsedURL.Hostname(), options)
+}
+
+func cloneURL(value *url.URL) *url.URL {
+	cloned := *value
+	return &cloned
+}
+
+func urlHostForIP(targetURL *url.URL, ip net.IP) string {
+	if port := targetURL.Port(); port != "" {
+		return net.JoinHostPort(ip.String(), port)
+	}
+	host := ip.String()
+	if strings.Contains(host, ":") {
+		return "[" + host + "]"
+	}
+	return host
+}
+
+func selectOutboundIP(ips []net.IP) net.IP {
+	for _, ip := range ips {
+		if ip.To4() != nil {
+			return ip
+		}
+	}
+	return ips[0]
+}
+
+func cloneTLSConfigWithServerName(config *tls.Config, serverName string) *tls.Config {
+	if config == nil {
+		return &tls.Config{ServerName: serverName}
+	}
+	cloned := config.Clone()
+	cloned.ServerName = serverName
+	return cloned
+}
+
+func safeDialContext(options Options) func(context.Context, string, string) (net.Conn, error) {
+	dialer := &net.Dialer{}
+	return func(ctx context.Context, network, address string) (net.Conn, error) {
+		host, port, err := net.SplitHostPort(address)
+		if err != nil {
+			return nil, err
+		}
+		ips, err := resolveAndValidateHost(host, options)
+		if err != nil {
+			return nil, err
+		}
+
+		var lastErr error
+		for _, ip := range ips {
+			conn, err := dialer.DialContext(ctx, network, net.JoinHostPort(ip.String(), port))
+			if err == nil {
+				return conn, nil
+			}
+			lastErr = err
+		}
+		if lastErr != nil {
+			return nil, lastErr
+		}
+		return nil, errors.New("无法连接目标主机")
+	}
+}
+
 func parseProxyURL(rawProxyURL string) (*url.URL, error) {
 	trimmed := strings.TrimSpace(rawProxyURL)
 	if trimmed == "" {
@@ -704,33 +841,56 @@ func parseProxyURL(rawProxyURL string) (*url.URL, error) {
 	if err != nil {
 		return nil, fmt.Errorf("代理 URL 格式无效: %w", err)
 	}
-	if proxyURL.Scheme != "http" && proxyURL.Scheme != "https" {
-		return nil, errors.New("仅支持 HTTP/HTTPS 代理")
-	}
-	if proxyURL.Host == "" {
-		return nil, errors.New("代理 URL 缺少主机名")
+	if err := validateProxyURL(proxyURL); err != nil {
+		return nil, err
 	}
 	return proxyURL, nil
 }
 
-func proxyFunc(options Options) func(*http.Request) (*url.URL, error) {
-	envProxy := http.ProxyFromEnvironment
-	return func(req *http.Request) (*url.URL, error) {
-		if shouldBypassProxy(req.URL, options.NoProxy) {
-			return nil, nil
-		}
+func validateProxyURL(proxyURL *url.URL) error {
+	if proxyURL.Scheme != "http" {
+		return errors.New("仅支持 HTTP 代理")
+	}
+	if proxyURL.Host == "" {
+		return errors.New("代理 URL 缺少主机名")
+	}
+	return nil
+}
 
-		if strings.TrimSpace(options.ProxyURL) != "" {
-			return parseProxyURL(options.ProxyURL)
-		}
-		if options.ProxyFromEnv {
-			return envProxy(req)
-		}
-		return nil, nil
+func proxyFunc(options Options) func(*http.Request) (*url.URL, error) {
+	return func(req *http.Request) (*url.URL, error) {
+		return proxyURLForRequest(req, options, nil)
 	}
 }
 
+func proxyURLForRequest(req *http.Request, options Options, resolvedIPs []net.IP) (*url.URL, error) {
+	if req == nil || req.URL == nil {
+		return nil, nil
+	}
+	if shouldBypassProxyWithIPs(req.URL, options.NoProxy, resolvedIPs) {
+		return nil, nil
+	}
+	if strings.TrimSpace(options.ProxyURL) != "" {
+		return parseProxyURL(options.ProxyURL)
+	}
+	if options.ProxyFromEnv {
+		proxyURL, err := http.ProxyFromEnvironment(req)
+		if err != nil || proxyURL == nil {
+			return proxyURL, err
+		}
+		if err := validateProxyURL(proxyURL); err != nil {
+			return nil, err
+		}
+		return proxyURL, nil
+	}
+	return nil, nil
+}
+
 func shouldBypassProxy(targetURL *url.URL, noProxy []string) bool {
+	return shouldBypassProxyWithIPs(targetURL, noProxy, nil)
+}
+
+func shouldBypassProxyWithIPs(targetURL *url.URL, noProxy []string, resolvedIPs []net.IP) bool {
 	if targetURL == nil {
 		return false
 	}
@@ -738,7 +898,10 @@ func shouldBypassProxy(targetURL *url.URL, noProxy []string) bool {
 	if host == "" {
 		return false
 	}
-	ip := net.ParseIP(strings.Trim(host, "[]"))
+	hostIP := net.ParseIP(strings.Trim(host, "[]"))
+	if hostIP != nil && len(resolvedIPs) == 0 {
+		resolvedIPs = []net.IP{hostIP}
+	}
 
 	for _, rule := range noProxy {
 		rule = strings.ToLower(strings.TrimSpace(rule))
@@ -748,21 +911,56 @@ func shouldBypassProxy(targetURL *url.URL, noProxy []string) bool {
 		if rule == "*" {
 			return true
 		}
-		if _, network, err := net.ParseCIDR(rule); err == nil {
-			if ip != nil && network.Contains(ip) {
+		ruleHost, rulePort := splitNoProxyRule(rule)
+		if rulePort != "" && rulePort != targetURL.Port() {
+			continue
+		}
+		if _, network, err := net.ParseCIDR(ruleHost); err == nil {
+			if anyIPInCIDR(resolvedIPs, network) {
 				return true
 			}
 			continue
 		}
-		if ruleIP := net.ParseIP(strings.Trim(rule, "[]")); ruleIP != nil {
-			if ip != nil && ip.Equal(ruleIP) {
+		if ruleIP := net.ParseIP(strings.Trim(ruleHost, "[]")); ruleIP != nil {
+			if anyIPMatches(resolvedIPs, ruleIP) {
 				return true
 			}
 			continue
 		}
 
-		domainRule := strings.TrimPrefix(rule, ".")
+		domainRule := strings.TrimPrefix(ruleHost, ".")
 		if host == domainRule || strings.HasSuffix(host, "."+domainRule) {
+			return true
+		}
+	}
+	return false
+}
+
+func splitNoProxyRule(rule string) (string, string) {
+	if host, port, err := net.SplitHostPort(rule); err == nil {
+		return strings.Trim(host, "[]"), port
+	}
+	if strings.Count(rule, ":") == 1 {
+		parts := strings.Split(rule, ":")
+		if parts[0] != "" && parts[1] != "" {
+			return parts[0], parts[1]
+		}
+	}
+	return rule, ""
+}
+
+func anyIPInCIDR(ips []net.IP, network *net.IPNet) bool {
+	for _, ip := range ips {
+		if network.Contains(ip) {
+			return true
+		}
+	}
+	return false
+}
+
+func anyIPMatches(ips []net.IP, want net.IP) bool {
+	for _, ip := range ips {
+		if ip.Equal(want) {
 			return true
 		}
 	}
