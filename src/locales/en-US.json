@@ -103,6 +103,18 @@
       "deleteWarnText": "Are you sure you want to delete this group [{name}]? The application icons in this group will be lost after deletion.",
       "groupName": "Group name"
     },
+    "networkSettings": {
+      "appName": "Network Settings",
+      "faviconFetch": "Favicon Fetch",
+      "loadFailed": "Failed to load network settings",
+      "noProxy": "No proxy",
+      "proxyFromEnv": "Use environment proxy",
+      "proxyUrl": "Proxy URL",
+      "test": "Test",
+      "testFailed": "Test failed",
+      "testSuccess": "Test succeeded",
+      "timeoutSeconds": "Timeout seconds"
+    },
     "uploadsFileManager": {
       "alertText": "Here you can manage wallpapers and icons you have uploaded.",
       "appName": "Upload File Management",

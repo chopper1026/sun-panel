@@ -98,9 +98,17 @@ onMounted(() => {
     icon: 'lucide-users',
     auth: 1,
   }
+  const networkSettingsApp: App = {
+    name: t('apps.networkSettings.appName'),
+    componentName: 'NetworkSettings',
+    icon: 'lucide-network',
+    auth: 1,
+  }
   // 初始化
-  if (authStore.userInfo?.role === 1)
+  if (authStore.userInfo?.role === 1) {
     apps.value.push(adminApp)
+    apps.value.push(networkSettingsApp)
+  }
 
   window.addEventListener('resize', handleResize)
   handleResize()

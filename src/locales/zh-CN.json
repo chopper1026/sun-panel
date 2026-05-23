@@ -103,6 +103,18 @@
       "deleteWarnText": "你确定删除此分组[{name}]，删除后此分组应用图标将丢失？",
       "groupName": "分组名称"
     },
+    "networkSettings": {
+      "appName": "网络设置",
+      "faviconFetch": "图标获取",
+      "loadFailed": "网络设置加载失败",
+      "noProxy": "不走代理",
+      "proxyFromEnv": "使用环境变量代理",
+      "proxyUrl": "代理地址",
+      "test": "测试连接",
+      "testFailed": "测试失败",
+      "testSuccess": "测试成功",
+      "timeoutSeconds": "超时时间（秒）"
+    },
     "uploadsFileManager": {
       "alertText": "你可以在这里管理你上传过的壁纸和图标",
       "appName": "上传文件管理",
