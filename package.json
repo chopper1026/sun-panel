@@ -10,6 +10,7 @@
   ],
   "scripts": {
     "dev": "vite",
+    "dev:local": "./scripts/dev.sh",
     "build": "run-p add-version type-check build-only",
     "add-version": "node ./add-frontend-version.js",
     "preview": "vite preview",
@@ -68,5 +69,6 @@
     "*.{ts,tsx,vue}": [
       "pnpm lint:fix"
     ]
-  }
+  },
+  "packageManager": "pnpm@8.15.9"
 }
