@@ -286,3 +286,77 @@ func TestGetOneFaviconURLPrefersSVGIcon(t *testing.T) {
 		t.Fatalf("icon URL mismatch\nwant: %s\n got: %s", want, iconURL)
 	}
 }
+
+func TestGetFaviconURLsWithOptionsUsesConfiguredHTTPProxy(t *testing.T) {
+	target := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		t.Fatalf("target should be reached through proxy, got direct request for %s", r.URL.String())
+	}))
+	defer target.Close()
+
+	proxy := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.String() != target.URL {
+			t.Fatalf("proxy received URL mismatch\nwant: %s\n got: %s", target.URL, r.URL.String())
+		}
+		w.Header().Set("Content-Type", "text/html")
+		_, _ = w.Write([]byte(`<html><head><link rel="icon" href="/favicon.png"></head></html>`))
+	}))
+	defer proxy.Close()
+
+	options := DefaultOptions()
+	options.ProxyURL = proxy.URL
+	options.ProxyFromEnv = false
+	options.NoProxy = nil
+
+	icons, err := GetFaviconURLsWithOptions(target.URL, options)
+	if err != nil {
+		t.Fatalf("expected favicon discovery through proxy, got error: %v", err)
+	}
+	if len(icons) == 0 || icons[0] != target.URL+"/favicon.png" {
+		t.Fatalf("unexpected icon candidates: %#v", icons)
+	}
+}
+
+func TestGetFaviconURLsWithOptionsBypassesProxyForNoProxyCIDR(t *testing.T) {
+	proxyHit := false
+	proxy := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		proxyHit = true
+		http.Error(w, "proxy should be bypassed", http.StatusBadGateway)
+	}))
+	defer proxy.Close()
+
+	target := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/html")
+		_, _ = w.Write([]byte(`<html><head><link rel="icon" href="/favicon.png"></head></html>`))
+	}))
+	defer target.Close()
+
+	options := DefaultOptions()
+	options.ProxyURL = proxy.URL
+	options.ProxyFromEnv = false
+	options.NoProxy = []string{"127.0.0.0/8"}
+	options.AllowCIDRs = []string{"127.0.0.0/8"}
+
+	icons, err := GetFaviconURLsWithOptions(target.URL, options)
+	if err != nil {
+		t.Fatalf("expected direct favicon discovery for no-proxy target, got error: %v", err)
+	}
+	if proxyHit {
+		t.Fatal("expected proxy to be bypassed")
+	}
+	if len(icons) == 0 || icons[0] != target.URL+"/favicon.png" {
+		t.Fatalf("unexpected icon candidates: %#v", icons)
+	}
+}
+
+func TestGetFaviconURLsWithOptionsRejectsInvalidProxyURL(t *testing.T) {
+	options := DefaultOptions()
+	options.ProxyURL = "socks5://127.0.0.1:7890"
+
+	_, err := GetFaviconURLsWithOptions("https://example.com", options)
+	if err == nil {
+		t.Fatal("expected invalid proxy URL error")
+	}
+	if !strings.Contains(err.Error(), "仅支持 HTTP/HTTPS 代理") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}

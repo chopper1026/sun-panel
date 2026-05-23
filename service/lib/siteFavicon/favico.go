@@ -42,6 +42,9 @@ type Options struct {
 	AllowCIDRs          []string
 	DenyHosts           []string
 	SkipSafetyCheck     bool
+	ProxyURL            string
+	ProxyFromEnv        bool
+	NoProxy             []string
 }
 
 func DefaultOptions() Options {
@@ -60,6 +63,13 @@ func DefaultOptions() Options {
 			"127.0.0.1",
 			"::1",
 			"169.254.169.254",
+		},
+		ProxyFromEnv: true,
+		NoProxy: []string{
+			"localhost",
+			"10.0.0.0/8",
+			"172.16.0.0/12",
+			"192.168.0.0/16",
 		},
 	}
 }
@@ -211,9 +221,16 @@ func getFaviconURL(rawURL string, options Options) ([]string, error) {
 	var lastErr error
 	for _, candidate := range candidates {
 		if !options.SkipSafetyCheck {
-			if err := validateParsedURLSafety(candidate, options); err != nil {
+			proxied, err := usesConfiguredProxy(candidate, options)
+			if err != nil {
 				lastErr = err
 				continue
+			}
+			if !proxied {
+				if err := validateParsedURLSafety(candidate, options); err != nil {
+					lastErr = err
+					continue
+				}
 			}
 		}
 		icons, err := discoverFaviconURLs(candidate, options)
@@ -229,6 +246,30 @@ func getFaviconURL(rawURL string, options Options) ([]string, error) {
 	return nil, errors.New("未找到图标")
 }
 
+func usesConfiguredProxy(targetURL *url.URL, options Options) (bool, error) {
+	if strings.TrimSpace(options.ProxyURL) == "" {
+		return false, nil
+	}
+	if shouldBypassProxy(targetURL, options.NoProxy) {
+		return false, nil
+	}
+	if _, err := parseProxyURL(options.ProxyURL); err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
+func preserveProxyRootRequestURI(req *http.Request, options Options) {
+	if req == nil || req.URL == nil || req.URL.Path != "" || req.URL.RawQuery != "" {
+		return
+	}
+	proxied, err := usesConfiguredProxy(req.URL, options)
+	if err != nil || !proxied {
+		return
+	}
+	req.URL.Opaque = "//" + req.URL.Host
+}
+
 func discoverFaviconURLs(pageURL *url.URL, options Options) ([]string, error) {
 	candidates := make([]iconCandidate, 0)
 	manifestURLs := make([]*url.URL, 0)
@@ -239,6 +280,7 @@ func discoverFaviconURLs(pageURL *url.URL, options Options) ([]string, error) {
 		return nil, err
 	}
 	req.Header.Set("User-Agent", userAgent)
+	preserveProxyRootRequestURI(req, options)
 
 	resp, err := client.Do(req)
 	if err != nil {
@@ -579,6 +621,9 @@ func validateParsedURLSafety(parsedURL *url.URL, options Options) error {
 	lowerHost := strings.ToLower(strings.Trim(host, "[]"))
 	for _, denied := range options.DenyHosts {
 		if lowerHost == strings.ToLower(strings.TrimSpace(denied)) {
+			if ip := net.ParseIP(lowerHost); ip != nil && cidrContainsIP(options.AllowCIDRs, ip) {
+				continue
+			}
 			if lowerHost == "localhost" || lowerHost == "127.0.0.1" || lowerHost == "::1" {
 				return errors.New("Docker 容器中的 localhost 不是你的电脑或 NAS 宿主机，请使用 NAS 在局域网中的真实 IP 或 Docker 网络可访问地址")
 			}
@@ -656,8 +701,12 @@ func cidrContainsIP(cidrs []string, ip net.IP) bool {
 }
 
 func newHTTPClient(options Options) *http.Client {
+	transport := http.DefaultTransport.(*http.Transport).Clone()
+	transport.Proxy = proxyFunc(options)
+
 	return &http.Client{
-		Timeout: options.Timeout,
+		Timeout:   options.Timeout,
+		Transport: transport,
 		CheckRedirect: func(req *http.Request, via []*http.Request) error {
 			if options.MaxRedirects > 0 && len(via) >= options.MaxRedirects {
 				return errors.New("重定向次数过多")
@@ -668,6 +717,80 @@ func newHTTPClient(options Options) *http.Client {
 			return validateParsedURLSafety(req.URL, options)
 		},
 	}
+}
+
+func parseProxyURL(rawProxyURL string) (*url.URL, error) {
+	trimmed := strings.TrimSpace(rawProxyURL)
+	if trimmed == "" {
+		return nil, nil
+	}
+	proxyURL, err := url.Parse(trimmed)
+	if err != nil {
+		return nil, fmt.Errorf("代理 URL 格式无效: %w", err)
+	}
+	if proxyURL.Scheme != "http" && proxyURL.Scheme != "https" {
+		return nil, errors.New("仅支持 HTTP/HTTPS 代理")
+	}
+	if proxyURL.Host == "" {
+		return nil, errors.New("代理 URL 缺少主机名")
+	}
+	return proxyURL, nil
+}
+
+func proxyFunc(options Options) func(*http.Request) (*url.URL, error) {
+	envProxy := http.ProxyFromEnvironment
+	return func(req *http.Request) (*url.URL, error) {
+		if shouldBypassProxy(req.URL, options.NoProxy) {
+			return nil, nil
+		}
+
+		if strings.TrimSpace(options.ProxyURL) != "" {
+			return parseProxyURL(options.ProxyURL)
+		}
+		if options.ProxyFromEnv {
+			return envProxy(req)
+		}
+		return nil, nil
+	}
+}
+
+func shouldBypassProxy(targetURL *url.URL, noProxy []string) bool {
+	if targetURL == nil {
+		return false
+	}
+	host := strings.ToLower(strings.TrimSpace(targetURL.Hostname()))
+	if host == "" {
+		return false
+	}
+	ip := net.ParseIP(strings.Trim(host, "[]"))
+
+	for _, rule := range noProxy {
+		rule = strings.ToLower(strings.TrimSpace(rule))
+		if rule == "" {
+			continue
+		}
+		if rule == "*" {
+			return true
+		}
+		if _, network, err := net.ParseCIDR(rule); err == nil {
+			if ip != nil && network.Contains(ip) {
+				return true
+			}
+			continue
+		}
+		if ruleIP := net.ParseIP(strings.Trim(rule, "[]")); ruleIP != nil {
+			if ip != nil && ip.Equal(ruleIP) {
+				return true
+			}
+			continue
+		}
+
+		domainRule := strings.TrimPrefix(rule, ".")
+		if host == domainRule || strings.HasSuffix(host, "."+domainRule) {
+			return true
+		}
+	}
+	return false
 }
 
 func normalizeOptions(options Options) Options {
@@ -686,6 +809,9 @@ func normalizeOptions(options Options) Options {
 	}
 	if options.DenyHosts == nil {
 		options.DenyHosts = defaults.DenyHosts
+	}
+	if options.NoProxy == nil {
+		options.NoProxy = defaults.NoProxy
 	}
 	return options
 }
