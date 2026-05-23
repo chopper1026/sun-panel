@@ -916,7 +916,7 @@ and include `NetworkSettings` in the export block.
 
 Add under `apps` in `src/locales/zh-CN.json`:
 
-```json
+```text
 "networkSettings": {
   "appName": "网络设置",
   "faviconFetch": "图标获取",
@@ -933,7 +933,7 @@ Add under `apps` in `src/locales/zh-CN.json`:
 
 Add under `apps` in `src/locales/en-US.json`:
 
-```json
+```text
 "networkSettings": {
   "appName": "Network Settings",
   "faviconFetch": "Favicon Fetch",
